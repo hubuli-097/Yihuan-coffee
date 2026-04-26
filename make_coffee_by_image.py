@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import sys
 import time
 import datetime as dt
 import threading
@@ -50,8 +51,27 @@ ROI_TOP = 100
 ROI_RIGHT = 1260
 ROI_BOTTOM = 400
 
-COORDS_MD_PATH = Path("坐标记录_手动补充_2026-04-25.md")
-ASSETS_DIR = Path("素材")
+COORDS_MD_NAME = "坐标记录_手动补充_2026-04-25.md"
+ASSETS_DIR_NAME = "素材"
+
+
+def resolve_resource_root() -> Path:
+    """
+    资源根目录：
+    - PyInstaller 单文件：资源打包在 datas 中，运行期解压到 sys._MEIPASS。
+    - 源码运行：脚本所在目录。
+    """
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = resolve_resource_root()
+COORDS_MD_PATH = BASE_DIR / COORDS_MD_NAME
+ASSETS_DIR = BASE_DIR / ASSETS_DIR_NAME
 PLASTIC_TEMPLATE_PATHS = [
     ASSETS_DIR / "塑料杯咖啡.png",
     ASSETS_DIR / "塑料杯咖啡2.png",
@@ -264,18 +284,58 @@ def imread_unicode(path: Path) -> Optional[np.ndarray]:
 
 
 def click_abs(x: int, y: int) -> None:
-    win32api.SetCursorPos((x, y))
+    # 避免偶发越界坐标导致 SetCursorPos 失败
+    vs_left = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+    vs_top = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
+    vs_width = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
+    vs_height = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
+    vs_right = vs_left + max(1, vs_width) - 1
+    vs_bottom = vs_top + max(1, vs_height) - 1
+
+    clamped_x = min(max(int(x), vs_left), vs_right)
+    clamped_y = min(max(int(y), vs_top), vs_bottom)
+    if clamped_x != x or clamped_y != y:
+        now = dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(
+            f"[{now}] 警告: 点击坐标越界，已钳制 "
+            f"({x}, {y}) -> ({clamped_x}, {clamped_y})，"
+            f"虚拟屏幕=({vs_left},{vs_top})-({vs_right},{vs_bottom})"
+        )
+
+    win32api.SetCursorPos((clamped_x, clamped_y))
     time.sleep(0.03)
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
+def click_rel_postmessage(hwnd: int, rel_x: int, rel_y: int) -> None:
+    # 降级方案：直接向窗口客户区投递鼠标消息，规避 SetCursorPos 在部分系统环境报错
+    lparam = (int(rel_y) << 16) | (int(rel_x) & 0xFFFF)
+    win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, lparam)
+    time.sleep(0.01)
+    win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam)
+    time.sleep(0.01)
+    win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
+
+
 def click_rel(hwnd: int, rel_x: int, rel_y: int) -> None:
+    if not win32gui.IsWindow(hwnd):
+        raise RuntimeError(f"目标窗口句柄无效: hwnd={hwnd}")
+    _origin, (cw, ch) = get_client_origin_and_size(hwnd)
+    if not (0 <= int(rel_x) < cw and 0 <= int(rel_y) < ch):
+        raise RuntimeError(
+            f"相对坐标超出客户区: ({rel_x}, {rel_y}), client=({cw}, {ch})"
+        )
     (ox, oy), _size = get_client_origin_and_size(hwnd)
     abs_x, abs_y = ox + rel_x, oy + rel_y
     now = dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"[{now}] 点击 -> 相对({rel_x}, {rel_y}) 绝对({abs_x}, {abs_y})")
-    click_abs(abs_x, abs_y)
+    try:
+        click_abs(abs_x, abs_y)
+    except Exception as exc:
+        now = dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"[{now}] SetCursorPos 点击失败，改用 PostMessage 降级点击: {exc}")
+        click_rel_postmessage(hwnd, rel_x, rel_y)
 
 
 def run_plastic_workflow(hwnd: int, coords: Dict[str, Tuple[int, int]]) -> None:
