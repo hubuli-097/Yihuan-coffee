@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['D:\\software\\AI_folder\\yihuankafei\\coffee_gui.py'],
+    ['coffee_gui.py'],
     pathex=[],
     binaries=[],
     datas=[],
