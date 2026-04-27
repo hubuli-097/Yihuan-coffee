@@ -38,7 +38,8 @@ def resolve_resource_root() -> Path:
 
 
 BASE_DIR = resolve_resource_root()
-COORDS_MD_PATH = BASE_DIR / COORDS_MD_NAME
+COORDS_MD_PATH = BASE_DIR / "数据记录" / "配置" / COORDS_MD_NAME
+LEGACY_COORDS_MD_PATH = BASE_DIR / COORDS_MD_NAME
 
 
 def enable_dpi_awareness() -> str:
@@ -69,6 +70,12 @@ def parse_coords_from_md(md_path: Path) -> Dict[str, Tuple[int, int]]:
     for name, x, y in pattern.findall(text):
         coords[name.strip()] = (int(x), int(y))
     return coords
+
+
+def resolve_coords_md_path() -> Path:
+    if COORDS_MD_PATH.exists():
+        return COORDS_MD_PATH
+    return LEGACY_COORDS_MD_PATH
 def get_window_pid(hwnd: int) -> Optional[int]:
     try:
         _thread, pid = win32process.GetWindowThreadProcessId(hwnd)
@@ -171,10 +178,11 @@ def main(auto_start: bool = False, run_gate: threading.Event | None = None) -> N
     dpi_mode = enable_dpi_awareness()
     print(f"DPI 模式: {dpi_mode}")
 
-    if not COORDS_MD_PATH.exists():
+    coords_md_path = resolve_coords_md_path()
+    if not coords_md_path.exists():
         raise FileNotFoundError(f"未找到坐标文件: {COORDS_MD_PATH}")
 
-    coords = parse_coords_from_md(COORDS_MD_PATH)
+    coords = parse_coords_from_md(coords_md_path)
     if "大锤" not in coords:
         raise KeyError("坐标文件缺少 '大锤' 坐标。")
 

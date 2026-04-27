@@ -30,7 +30,8 @@ WINDOW_KEYWORD = "异环"
 TARGET_PROCESS_NAMES = {"HTGame.exe"}
 TARGET_WIDTH = 1600
 TARGET_HEIGHT = 900
-LOG_FILE = Path(f"coords_{dt.date.today().isoformat()}.md")
+LOG_DIR = Path("数据记录/配置/capture_coords")
+LOG_FILE = LOG_DIR / f"coords_{dt.date.today().isoformat()}.md"
 
 
 def enable_dpi_awareness() -> str:
@@ -165,6 +166,7 @@ def get_client_origin_and_size(hwnd: int) -> Tuple[Tuple[int, int], Tuple[int, i
 
 
 def init_log_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         return
     header = (

@@ -14,6 +14,7 @@ import win32api
 import win32con
 import win32gui
 
+import fishing_entry_flow as fishing_mode
 import make_coffee_by_image as coffee
 import 大锤模式 as hammer_mode
 
@@ -22,6 +23,7 @@ MATCH_THRESHOLD = 0.84
 POLL_INTERVAL_SEC = 0.12
 CLICK_INTERVAL_SEC = 0.12
 WAIT_AFTER_START_SEC = 50.0
+FISHING_ROUNDS = 100
 START_DISAPPEAR_TIMEOUT_SEC = 20.0
 POST_FIRST_CLICK_PRIORITY_SEC = 3.0
 ASSETS_DIR = coffee.BASE_DIR / "素材"
@@ -122,6 +124,20 @@ def run_hammer_worker_with_gate(run_gate: threading.Event) -> None:
     hammer_mode.main(auto_start=True, run_gate=run_gate)
 
 
+def run_fishing_loop(total_rounds: int) -> None:
+    """
+    钓鱼模式主循环：
+    执行指定轮数；如需提前停止由外部（GUI）终止本进程。
+    """
+    round_index = 1
+    while round_index <= total_rounds:
+        print(f"\n===== 第 {round_index} 轮钓鱼流程开始 =====")
+        fishing_mode.run_flow()
+        round_index += 1
+        time.sleep(0.2)
+    print(f"钓鱼模式执行完成，共 {total_rounds} 轮。")
+
+
 def wait_start_template_disappear(
     hwnd: int,
     start_templates: List,
@@ -211,15 +227,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="异环营业流程脚本")
     parser.add_argument(
         "--worker-mode",
-        choices=("coffee", "hammer"),
+        choices=("coffee", "hammer", "fishing"),
         default="coffee",
-        help="并行工作线程模式：coffee=make_coffee_by_image，hammer=大锤模式",
+        help="并行工作线程模式：coffee=make_coffee_by_image，hammer=大锤模式，fishing=钓鱼模式",
     )
     parser.add_argument(
         "--wait-after-start-sec",
         type=float,
         default=WAIT_AFTER_START_SEC,
         help="点击开始营业后的等待秒数",
+    )
+    parser.add_argument(
+        "--fishing-rounds",
+        type=int,
+        default=FISHING_ROUNDS,
+        help="钓鱼模式单次执行轮数",
     )
     return parser.parse_args()
 
@@ -234,6 +256,14 @@ def main() -> None:
     if args.wait_after_start_sec < 0:
         raise ValueError("--wait-after-start-sec 不能小于 0")
     print(f"开始营业后等待时长: {args.wait_after_start_sec:.1f}s")
+    if args.fishing_rounds <= 0:
+        raise ValueError("--fishing-rounds 必须大于 0")
+    print(f"钓鱼模式单次执行轮数: {args.fishing_rounds}")
+
+    if args.worker_mode == "fishing":
+        print("启动 钓鱼模式（fishing_entry_flow）")
+        run_fishing_loop(args.fishing_rounds)
+        return
 
     for p in (MANAGER_SPECIAL_PATH, START_TEMPLATE_PATH, CLAIM_TEMPLATE_PATH, EXIT_TEMPLATE_PATH):
         if not p.exists():

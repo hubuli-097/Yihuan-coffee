@@ -70,7 +70,8 @@ def resolve_resource_root() -> Path:
 
 
 BASE_DIR = resolve_resource_root()
-COORDS_MD_PATH = BASE_DIR / COORDS_MD_NAME
+COORDS_MD_PATH = BASE_DIR / "数据记录" / "配置" / COORDS_MD_NAME
+LEGACY_COORDS_MD_PATH = BASE_DIR / COORDS_MD_NAME
 ASSETS_DIR = BASE_DIR / ASSETS_DIR_NAME
 PLASTIC_TEMPLATE_PATHS = [
     ASSETS_DIR / "塑料杯咖啡.png",
@@ -130,6 +131,15 @@ def parse_coords_from_md(md_path: Path) -> Dict[str, Tuple[int, int]]:
     for name, x, y in pattern.findall(text):
         coords[name.strip()] = (int(x), int(y))
     return coords
+
+
+def resolve_coords_md_path() -> Path:
+    """
+    优先使用新配置目录；兼容旧版根目录坐标文件。
+    """
+    if COORDS_MD_PATH.exists():
+        return COORDS_MD_PATH
+    return LEGACY_COORDS_MD_PATH
 
 
 def get_window_pid(hwnd: int) -> Optional[int]:
@@ -531,7 +541,8 @@ def main() -> None:
     dpi_mode = enable_dpi_awareness()
     print(f"DPI 感知模式: {dpi_mode}")
 
-    if not COORDS_MD_PATH.exists():
+    coords_md_path = resolve_coords_md_path()
+    if not coords_md_path.exists():
         raise FileNotFoundError(f"坐标文件不存在: {COORDS_MD_PATH}")
     for p in (
         PLASTIC_TEMPLATE_PATHS
@@ -545,7 +556,7 @@ def main() -> None:
         if not p.exists():
             raise FileNotFoundError(f"模板不存在: {p}")
 
-    coords = parse_coords_from_md(COORDS_MD_PATH)
+    coords = parse_coords_from_md(coords_md_path)
     required_keys = {
         "塑料杯", "瓷杯", "咖啡", "刮花", "牛奶", "补充咖啡",
         "切牛角包", "拿牛角包", "鸡蛋配料",

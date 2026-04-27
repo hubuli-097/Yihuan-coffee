@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+
+build/
+dist/
+.runtime/
+
+*.log
+worker_error.log
+
+coffee_gui_settings.json
+dist/coffee_gui_settings.json
+
+# Debug artifacts
+debug_*.png
+hsv_*.png
+
+# Runtime debug outputs
+数据记录/调试/

@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import psutil
 import queue
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import scrolledtext
+from tkinter import ttk
 import datetime as dt
 
 from pynput import keyboard
@@ -55,7 +57,7 @@ def get_worker_python(repo_root: Path) -> str | None:
 
 
 def get_log_path() -> Path:
-    return get_app_base_dir() / "coffee_gui_debug.log"
+    return get_app_base_dir() / "数据记录" / "调试" / "coffee_gui" / "coffee_gui_debug.log"
 
 
 def get_settings_path() -> Path:
@@ -66,7 +68,9 @@ def write_debug_log(message: str) -> None:
     try:
         ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         line = f"[{ts}] {message}\n"
-        with get_log_path().open("a", encoding="utf-8") as f:
+        log_path = get_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
         # 调试日志绝不能影响主流程
@@ -89,13 +93,23 @@ class CoffeeGuiApp:
         self.status_var = tk.StringVar(value="状态：未运行")
         self.mode_var = tk.StringVar(value="coffee")
         self.wait_after_start_var = tk.StringVar(value="50")
+        self.fishing_rounds_var = tk.StringVar(value="100")
         self._x1_last_down = False  # 鼠标前侧键
         self._x2_last_down = False  # 鼠标后侧键
         self._loading_settings = False
+        self.mode_display_map = {
+            "咖啡模式（make_coffee_by_image）": "coffee",
+            "大锤模式（大锤模式.py）": "hammer",
+            "钓鱼模式（fishing_entry_flow.py）": "fishing",
+        }
+        self.mode_display_var = tk.StringVar(value="咖啡模式（make_coffee_by_image）")
         self._build_ui()
         self._load_settings()
         self.mode_var.trace_add("write", self._on_settings_changed)
         self.wait_after_start_var.trace_add("write", self._on_settings_changed)
+        self.fishing_rounds_var.trace_add("write", self._on_settings_changed)
+        self._sync_mode_display_from_mode_var()
+        self._refresh_mode_specific_fields()
         self._start_hotkey_listener()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         write_debug_log("GUI __init__ done")
@@ -122,23 +136,24 @@ class CoffeeGuiApp:
         mode_row = tk.Frame(frame)
         mode_row.pack(fill=tk.X, pady=(0, 10))
         tk.Label(mode_row, text="模式：").pack(side=tk.LEFT)
-        tk.Radiobutton(
+        self.mode_combo = ttk.Combobox(
             mode_row,
-            text="咖啡模式（make_coffee_by_image）",
-            variable=self.mode_var,
-            value="coffee",
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Radiobutton(
-            mode_row,
-            text="大锤模式（大锤模式.py）",
-            variable=self.mode_var,
-            value="hammer",
-        ).pack(side=tk.LEFT)
+            textvariable=self.mode_display_var,
+            values=list(self.mode_display_map.keys()),
+            state="readonly",
+            width=34,
+        )
+        self.mode_combo.pack(side=tk.LEFT)
+        self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_combo_changed)
 
-        wait_row = tk.Frame(frame)
-        wait_row.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(wait_row, text="开始营业后等待(秒)：").pack(side=tk.LEFT)
-        tk.Entry(wait_row, width=8, textvariable=self.wait_after_start_var).pack(side=tk.LEFT)
+        self.wait_row = tk.Frame(frame)
+        self.wait_row.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(self.wait_row, text="开始营业后等待(秒)：").pack(side=tk.LEFT)
+        tk.Entry(self.wait_row, width=8, textvariable=self.wait_after_start_var).pack(side=tk.LEFT)
+
+        self.fishing_rounds_row = tk.Frame(frame)
+        tk.Label(self.fishing_rounds_row, text="单次执行轮数：").pack(side=tk.LEFT)
+        tk.Entry(self.fishing_rounds_row, width=8, textvariable=self.fishing_rounds_var).pack(side=tk.LEFT)
 
         tips = tk.Label(
             frame,
@@ -201,7 +216,7 @@ class CoffeeGuiApp:
         self._loading_settings = True
         try:
             mode = str(data.get("mode", "")).strip()
-            if mode in {"coffee", "hammer"}:
+            if mode in {"coffee", "hammer", "fishing"}:
                 self.mode_var.set(mode)
 
             wait_sec = data.get("wait_after_start_sec")
@@ -209,14 +224,23 @@ class CoffeeGuiApp:
                 self.wait_after_start_var.set(str(wait_sec))
             elif isinstance(wait_sec, str) and wait_sec.strip():
                 self.wait_after_start_var.set(wait_sec.strip())
+
+            fishing_rounds = data.get("fishing_rounds")
+            if isinstance(fishing_rounds, (int, float)):
+                self.fishing_rounds_var.set(str(int(fishing_rounds)))
+            elif isinstance(fishing_rounds, str) and fishing_rounds.strip():
+                self.fishing_rounds_var.set(fishing_rounds.strip())
         finally:
             self._loading_settings = False
+            self._sync_mode_display_from_mode_var()
+            self._refresh_mode_specific_fields()
 
     def _save_settings(self) -> None:
         settings_path = get_settings_path()
         payload = {
             "mode": self.mode_var.get().strip() or "coffee",
             "wait_after_start_sec": self.wait_after_start_var.get().strip() or "50",
+            "fishing_rounds": self.fishing_rounds_var.get().strip() or "100",
         }
         try:
             settings_path.write_text(
@@ -230,6 +254,29 @@ class CoffeeGuiApp:
         if self._loading_settings:
             return
         self._save_settings()
+
+    def _on_mode_combo_changed(self, _event=None) -> None:
+        mode = self.mode_display_map.get(self.mode_display_var.get().strip(), "coffee")
+        self.mode_var.set(mode)
+        self._refresh_mode_specific_fields()
+
+    def _sync_mode_display_from_mode_var(self) -> None:
+        mode = self.mode_var.get().strip() or "coffee"
+        reverse_map = {v: k for k, v in self.mode_display_map.items()}
+        self.mode_display_var.set(reverse_map.get(mode, "咖啡模式（make_coffee_by_image）"))
+
+    def _refresh_mode_specific_fields(self) -> None:
+        mode = self.mode_var.get().strip() or "coffee"
+        if mode == "fishing":
+            if self.wait_row.winfo_manager():
+                self.wait_row.pack_forget()
+            if not self.fishing_rounds_row.winfo_manager():
+                self.fishing_rounds_row.pack(fill=tk.X, pady=(0, 10))
+        else:
+            if self.fishing_rounds_row.winfo_manager():
+                self.fishing_rounds_row.pack_forget()
+            if not self.wait_row.winfo_manager():
+                self.wait_row.pack(fill=tk.X, pady=(0, 10))
 
     def _schedule_log_poll(self) -> None:
         try:
@@ -275,16 +322,32 @@ class CoffeeGuiApp:
             return
 
         wait_after_start_text = self.wait_after_start_var.get().strip()
-        try:
-            wait_after_start_sec = float(wait_after_start_text)
-        except ValueError:
-            self.status_var.set("状态：启动失败")
-            self._append_log(f"[GUI] 等待秒数不是有效数字：{wait_after_start_text}\n")
-            return
-        if wait_after_start_sec < 0:
-            self.status_var.set("状态：启动失败")
-            self._append_log("[GUI] 等待秒数不能小于 0\n")
-            return
+        wait_after_start_sec = 0.0
+        if worker_mode in {"coffee", "hammer"}:
+            try:
+                wait_after_start_sec = float(wait_after_start_text)
+            except ValueError:
+                self.status_var.set("状态：启动失败")
+                self._append_log(f"[GUI] 等待秒数不是有效数字：{wait_after_start_text}\n")
+                return
+            if wait_after_start_sec < 0:
+                self.status_var.set("状态：启动失败")
+                self._append_log("[GUI] 等待秒数不能小于 0\n")
+                return
+
+        fishing_rounds = 100
+        if worker_mode == "fishing":
+            rounds_text = self.fishing_rounds_var.get().strip()
+            try:
+                fishing_rounds = int(rounds_text)
+            except ValueError:
+                self.status_var.set("状态：启动失败")
+                self._append_log(f"[GUI] 钓鱼轮数不是有效整数：{rounds_text}\n")
+                return
+            if fishing_rounds <= 0:
+                self.status_var.set("状态：启动失败")
+                self._append_log("[GUI] 钓鱼轮数必须大于 0\n")
+                return
 
         cmd = [
             python_exe,
@@ -295,6 +358,8 @@ class CoffeeGuiApp:
             "--wait-after-start-sec",
             str(wait_after_start_sec),
         ]
+        if worker_mode == "fishing":
+            cmd.extend(["--fishing-rounds", str(fishing_rounds)])
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -321,7 +386,8 @@ class CoffeeGuiApp:
             )
         except Exception as exc:
             write_debug_log(f"Popen failed: {type(exc).__name__}: {exc}")
-            err_path = get_app_base_dir() / "worker_error.log"
+            err_path = get_app_base_dir() / "数据记录" / "调试" / "coffee_gui" / "worker_error.log"
+            err_path.parent.mkdir(parents=True, exist_ok=True)
             with err_path.open("a", encoding="utf-8") as f:
                 f.write("\n=== worker start crash ===\n")
                 f.write(traceback.format_exc())
@@ -335,7 +401,10 @@ class CoffeeGuiApp:
         self.status_var.set(f"状态：运行中 (PID={self.process.pid})")
         self._append_log(f"[GUI] 当前模式：{worker_mode}\n")
         self._append_log(f"[GUI] 流程脚本：{script_path.name}\n")
-        self._append_log(f"[GUI] 开始营业后等待：{wait_after_start_sec:.1f}s\n")
+        if worker_mode in {"coffee", "hammer"}:
+            self._append_log(f"[GUI] 开始营业后等待：{wait_after_start_sec:.1f}s\n")
+        if worker_mode == "fishing":
+            self._append_log(f"[GUI] 单次执行轮数：{fishing_rounds}\n")
         self._append_log(f"\n[GUI] 脚本已启动，PID={self.process.pid}\n")
 
     def stop_script(self) -> None:
@@ -358,6 +427,39 @@ class CoffeeGuiApp:
             self._append_log("[GUI] 脚本已停止\n")
             write_debug_log("worker stopped")
             self.process = None
+            self._stop_residual_fishing_bot()
+
+    def _stop_residual_fishing_bot(self) -> None:
+        """
+        前端停止时兜底清理 fishing_bot.py，避免主流程被结束后子进程残留。
+        """
+        repo_root = get_repo_root_dir()
+        killed_pids: list[int] = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmdline = proc.info.get("cmdline") or []
+                if not cmdline:
+                    continue
+                normalized_parts = [str(part).replace("\\", "/").lower() for part in cmdline if part]
+                if not any(part.endswith("/fishing_bot.py") or part.endswith("fishing_bot.py") for part in normalized_parts):
+                    continue
+                # 尽量只清理当前仓库内的 fishing_bot，避免误杀。
+                in_repo = any(str(repo_root).replace("\\", "/").lower() in part for part in normalized_parts)
+                if not in_repo and not any(part == "fishing_bot.py" for part in normalized_parts):
+                    continue
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    proc.kill()
+                killed_pids.append(int(proc.pid))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            except Exception as exc:
+                write_debug_log(f"stop residual fishing_bot error pid={getattr(proc, 'pid', 'unknown')}: {exc}")
+        if killed_pids:
+            self._append_log(f"[GUI] 已结束残留 fishing_bot 进程: {killed_pids}\n")
+            write_debug_log(f"residual fishing_bot killed: {killed_pids}")
 
     def on_close(self) -> None:
         write_debug_log("GUI on_close")
