@@ -42,8 +42,22 @@ ROI_BOTTOM = 70
 HSV_GREEN_LOWER = np.array([72, 135, 95], dtype=np.uint8)
 HSV_GREEN_UPPER = np.array([96, 255, 255], dtype=np.uint8)
 
-HSV_YELLOW_LOWER = np.array([16, 30, 75], dtype=np.uint8)
-HSV_YELLOW_UPPER = np.array([38, 210, 255], dtype=np.uint8)
+YELLOW_HSV_PROFILES = {
+    # 严格：按黄色样本 5~95 分位数附近，误检更少
+    "strict": (
+        np.array([25, 68, 232], dtype=np.uint8),
+        np.array([30, 133, 255], dtype=np.uint8),
+    ),
+    # 宽松：适度放宽，提升波动场景下检出率
+    "loose": (
+        np.array([24, 60, 225], dtype=np.uint8),
+        np.array([32, 150, 255], dtype=np.uint8),
+    ),
+}
+YELLOW_HSV_PROFILE_NAME = os.environ.get("FISHING_YELLOW_HSV_PROFILE", "strict").strip().lower()
+if YELLOW_HSV_PROFILE_NAME not in YELLOW_HSV_PROFILES:
+    YELLOW_HSV_PROFILE_NAME = "strict"
+HSV_YELLOW_LOWER, HSV_YELLOW_UPPER = YELLOW_HSV_PROFILES[YELLOW_HSV_PROFILE_NAME]
 
 DEAD_ZONE = 10
 LOOP_INTERVAL = 0.04
@@ -434,6 +448,10 @@ def main() -> None:
     dpi_mode = enable_dpi_awareness()
     print(f"[INFO] DPI 感知模式: {dpi_mode}")
     print(f"[INFO] CAPTURE_BACKEND={CAPTURE_BACKEND}, INPUT_BACKEND={INPUT_BACKEND}")
+    print(
+        f"[INFO] YELLOW_HSV_PROFILE={YELLOW_HSV_PROFILE_NAME} "
+        f"lower={HSV_YELLOW_LOWER.tolist()} upper={HSV_YELLOW_UPPER.tolist()}"
+    )
 
     if INPUT_BACKEND == "pydirectinput":
         pydirectinput.PAUSE = 0

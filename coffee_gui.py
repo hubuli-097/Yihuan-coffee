@@ -94,6 +94,7 @@ class CoffeeGuiApp:
         self.mode_var = tk.StringVar(value="coffee")
         self.wait_after_start_var = tk.StringVar(value="50")
         self.fishing_rounds_var = tk.StringVar(value="100")
+        self.fishing_hsv_profile_var = tk.StringVar(value="strict")
         self._x1_last_down = False  # 鼠标前侧键
         self._x2_last_down = False  # 鼠标后侧键
         self._loading_settings = False
@@ -103,12 +104,19 @@ class CoffeeGuiApp:
             "钓鱼模式（fishing_entry_flow.py）": "fishing",
         }
         self.mode_display_var = tk.StringVar(value="咖啡模式（make_coffee_by_image）")
+        self.fishing_hsv_display_map = {
+            "严格": "strict",
+            "宽松": "loose",
+        }
+        self.fishing_hsv_display_var = tk.StringVar(value="严格")
         self._build_ui()
         self._load_settings()
         self.mode_var.trace_add("write", self._on_settings_changed)
         self.wait_after_start_var.trace_add("write", self._on_settings_changed)
         self.fishing_rounds_var.trace_add("write", self._on_settings_changed)
+        self.fishing_hsv_profile_var.trace_add("write", self._on_settings_changed)
         self._sync_mode_display_from_mode_var()
+        self._sync_fishing_hsv_display_from_profile_var()
         self._refresh_mode_specific_fields()
         self._start_hotkey_listener()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -154,6 +162,18 @@ class CoffeeGuiApp:
         self.fishing_rounds_row = tk.Frame(frame)
         tk.Label(self.fishing_rounds_row, text="单次执行轮数：").pack(side=tk.LEFT)
         tk.Entry(self.fishing_rounds_row, width=8, textvariable=self.fishing_rounds_var).pack(side=tk.LEFT)
+
+        self.fishing_hsv_row = tk.Frame(frame)
+        tk.Label(self.fishing_hsv_row, text="黄色HSV档位：").pack(side=tk.LEFT)
+        self.fishing_hsv_combo = ttk.Combobox(
+            self.fishing_hsv_row,
+            textvariable=self.fishing_hsv_display_var,
+            values=list(self.fishing_hsv_display_map.keys()),
+            state="readonly",
+            width=10,
+        )
+        self.fishing_hsv_combo.pack(side=tk.LEFT)
+        self.fishing_hsv_combo.bind("<<ComboboxSelected>>", self._on_fishing_hsv_combo_changed)
 
         tips = tk.Label(
             frame,
@@ -230,9 +250,14 @@ class CoffeeGuiApp:
                 self.fishing_rounds_var.set(str(int(fishing_rounds)))
             elif isinstance(fishing_rounds, str) and fishing_rounds.strip():
                 self.fishing_rounds_var.set(fishing_rounds.strip())
+
+            fishing_hsv_profile = str(data.get("fishing_hsv_profile", "")).strip().lower()
+            if fishing_hsv_profile in {"strict", "loose"}:
+                self.fishing_hsv_profile_var.set(fishing_hsv_profile)
         finally:
             self._loading_settings = False
             self._sync_mode_display_from_mode_var()
+            self._sync_fishing_hsv_display_from_profile_var()
             self._refresh_mode_specific_fields()
 
     def _save_settings(self) -> None:
@@ -241,6 +266,7 @@ class CoffeeGuiApp:
             "mode": self.mode_var.get().strip() or "coffee",
             "wait_after_start_sec": self.wait_after_start_var.get().strip() or "50",
             "fishing_rounds": self.fishing_rounds_var.get().strip() or "100",
+            "fishing_hsv_profile": self.fishing_hsv_profile_var.get().strip() or "strict",
         }
         try:
             settings_path.write_text(
@@ -265,6 +291,15 @@ class CoffeeGuiApp:
         reverse_map = {v: k for k, v in self.mode_display_map.items()}
         self.mode_display_var.set(reverse_map.get(mode, "咖啡模式（make_coffee_by_image）"))
 
+    def _on_fishing_hsv_combo_changed(self, _event=None) -> None:
+        profile = self.fishing_hsv_display_map.get(self.fishing_hsv_display_var.get().strip(), "strict")
+        self.fishing_hsv_profile_var.set(profile)
+
+    def _sync_fishing_hsv_display_from_profile_var(self) -> None:
+        profile = self.fishing_hsv_profile_var.get().strip().lower() or "strict"
+        reverse_map = {v: k for k, v in self.fishing_hsv_display_map.items()}
+        self.fishing_hsv_display_var.set(reverse_map.get(profile, "严格"))
+
     def _refresh_mode_specific_fields(self) -> None:
         mode = self.mode_var.get().strip() or "coffee"
         if mode == "fishing":
@@ -272,9 +307,13 @@ class CoffeeGuiApp:
                 self.wait_row.pack_forget()
             if not self.fishing_rounds_row.winfo_manager():
                 self.fishing_rounds_row.pack(fill=tk.X, pady=(0, 10))
+            if not self.fishing_hsv_row.winfo_manager():
+                self.fishing_hsv_row.pack(fill=tk.X, pady=(0, 10))
         else:
             if self.fishing_rounds_row.winfo_manager():
                 self.fishing_rounds_row.pack_forget()
+            if self.fishing_hsv_row.winfo_manager():
+                self.fishing_hsv_row.pack_forget()
             if not self.wait_row.winfo_manager():
                 self.wait_row.pack(fill=tk.X, pady=(0, 10))
 
@@ -348,6 +387,11 @@ class CoffeeGuiApp:
                 self.status_var.set("状态：启动失败")
                 self._append_log("[GUI] 钓鱼轮数必须大于 0\n")
                 return
+            hsv_profile = self.fishing_hsv_profile_var.get().strip().lower() or "strict"
+            if hsv_profile not in {"strict", "loose"}:
+                hsv_profile = "strict"
+                self.fishing_hsv_profile_var.set(hsv_profile)
+                self._sync_fishing_hsv_display_from_profile_var()
 
         cmd = [
             python_exe,
@@ -360,6 +404,7 @@ class CoffeeGuiApp:
         ]
         if worker_mode == "fishing":
             cmd.extend(["--fishing-rounds", str(fishing_rounds)])
+            cmd.extend(["--fishing-yellow-hsv-profile", hsv_profile])
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -405,6 +450,9 @@ class CoffeeGuiApp:
             self._append_log(f"[GUI] 开始营业后等待：{wait_after_start_sec:.1f}s\n")
         if worker_mode == "fishing":
             self._append_log(f"[GUI] 单次执行轮数：{fishing_rounds}\n")
+            self._append_log(
+                f"[GUI] 黄色HSV档位：{self.fishing_hsv_display_var.get().strip() or '严格'}\n"
+            )
         self._append_log(f"\n[GUI] 脚本已启动，PID={self.process.pid}\n")
 
     def stop_script(self) -> None:

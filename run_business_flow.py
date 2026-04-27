@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ POLL_INTERVAL_SEC = 0.12
 CLICK_INTERVAL_SEC = 0.12
 WAIT_AFTER_START_SEC = 50.0
 FISHING_ROUNDS = 100
+FISHING_YELLOW_HSV_PROFILE = "strict"
 START_DISAPPEAR_TIMEOUT_SEC = 20.0
 POST_FIRST_CLICK_PRIORITY_SEC = 3.0
 ASSETS_DIR = coffee.BASE_DIR / "素材"
@@ -243,6 +245,12 @@ def parse_args() -> argparse.Namespace:
         default=FISHING_ROUNDS,
         help="钓鱼模式单次执行轮数",
     )
+    parser.add_argument(
+        "--fishing-yellow-hsv-profile",
+        choices=("strict", "loose"),
+        default=FISHING_YELLOW_HSV_PROFILE,
+        help="钓鱼黄线 HSV 档位：strict=严格，loose=宽松",
+    )
     return parser.parse_args()
 
 
@@ -259,8 +267,10 @@ def main() -> None:
     if args.fishing_rounds <= 0:
         raise ValueError("--fishing-rounds 必须大于 0")
     print(f"钓鱼模式单次执行轮数: {args.fishing_rounds}")
+    print(f"钓鱼黄色HSV档位: {args.fishing_yellow_hsv_profile}")
 
     if args.worker_mode == "fishing":
+        os.environ["FISHING_YELLOW_HSV_PROFILE"] = args.fishing_yellow_hsv_profile
         print("启动 钓鱼模式（fishing_entry_flow）")
         run_fishing_loop(args.fishing_rounds)
         return

@@ -19,6 +19,8 @@ import win32process
 import win32ui
 import win32con
 
+from fishing_recovery import BOT_TIMEOUT_SEC, RecoveryState, attempt_fishing_recovery
+
 
 # ===== 基础配置（固定 1600x900 客户端坐标，不做归一化） =====
 WINDOW_TITLE_KEYWORD = "异环"
@@ -50,10 +52,23 @@ PW_RENDERFULLCONTENT = 0x00000002
 TEMPLATE_SCALES = (1.0,)
 # 经验值：alpha+CCORR_NORMED 在这组图标上命中约 0.91
 MASK_MATCH_THRESHOLD = 0.88
-CLICK_MATCH_THRESHOLD = 0.50
+CLICK_MATCH_THRESHOLD = 0.80
 CLOSE_MATCH_THRESHOLD = 0.84
 DISAPPEAR_ABSENT_CONSEC_FRAMES = 1
 MAX_F_PRESS_COUNT_IN_STAGE2 = 45
+CLOSE_HIT_CONSEC_FRAMES = 3
+
+
+def terminate_bot_process(bot_proc: Optional[subprocess.Popen]) -> None:
+    if bot_proc is None:
+        return
+    if bot_proc.poll() is not None:
+        return
+    bot_proc.terminate()
+    try:
+        bot_proc.wait(timeout=3)
+    except Exception:
+        bot_proc.kill()
 
 
 def imread_unicode(path: Path) -> np.ndarray | None:
@@ -445,126 +460,260 @@ def run_flow() -> None:
     print(f"[INFO] CAPTURE_BACKEND={CAPTURE_BACKEND}, ALLOW_MSS_FALLBACK_WHEN_PW_FAIL={ALLOW_MSS_FALLBACK_WHEN_PW_FAIL}")
     print(f"[INFO] INPUT_BACKEND={INPUT_BACKEND}")
 
-    bot_proc: Optional[subprocess.Popen] = None
-    bot_start_signal_path = Path(f".runtime/fishing_bot_start_{int(time.time() * 1000)}.signal")
-    warned_state: dict[str, bool] = {}
+    recovery_state = RecoveryState()
+    while True:
+        bot_proc: Optional[subprocess.Popen] = None
+        bot_start_signal_path = Path(f".runtime/fishing_bot_start_{int(time.time() * 1000)}.signal")
+        warned_state: dict[str, bool] = {}
+        should_restart_flow = False
+        stage_progress_ts = time.time()
+        bot_call_start_ts: Optional[float] = None
 
-    with mss.MSS() as sct:
-        # 1) 点击图标出现
-        while True:
-            if not win32gui.IsWindow(hwnd):
-                print("[ERROR] 目标窗口失效，流程结束。")
-                return
-            client_origin = get_client_origin(hwnd)
-            if client_origin is None:
-                time.sleep(POLL_INTERVAL)
-                continue
-            click_roi_img = capture_roi_auto(sct, hwnd, client_origin, CLICK_ROI, warned_state)
-            if click_roi_img is None:
-                time.sleep(POLL_INTERVAL)
-                continue
-            score_click = match_template_click(click_roi_img, click_tpl, click_mask)
-            if score_click >= CLICK_MATCH_THRESHOLD:
-                print(f"[INFO] 命中 点击.png，score={score_click:.3f}，开始按F。")
-                break
-            time.sleep(POLL_INTERVAL)
+        def try_recovery(trigger_label: str) -> bool:
+            nonlocal should_restart_flow, bot_call_start_ts, stage_progress_ts, bot_proc
+            step_stuck_sec = time.time() - stage_progress_ts
+            bot_elapsed_sec = 0.0
+            if bot_call_start_ts is not None:
+                bot_elapsed_sec = time.time() - bot_call_start_ts
 
-        # 2) 按F直到“点击图标”无法匹配
-        if PRELAUNCH_BOT and bot_proc is None:
-            if not PYTHON_EXE.exists() or not FISHING_BOT_PATH.exists():
-                print("[ERROR] .venv Python 或 fishing_bot.py 不存在，无法预启动 fishing_bot.py。")
-                return
-            bot_start_signal_path.parent.mkdir(parents=True, exist_ok=True)
-            env = os.environ.copy()
-            env["FISHING_BOT_WAIT_SIGNAL"] = "1"
-            env["FISHING_BOT_START_SIGNAL_PATH"] = str(bot_start_signal_path.resolve())
-            bot_proc = subprocess.Popen([str(PYTHON_EXE), str(FISHING_BOT_PATH)], env=env)
-            print(f"[INFO] fishing_bot.py 预启动完成，pid={bot_proc.pid}，等待启动信号。")
+            # 需求：当 fishing_bot 调用超过 40s 进入兜底时，先停 bot 再走重启路径。
+            if bot_elapsed_sec > BOT_TIMEOUT_SEC and bot_proc is not None and bot_proc.poll() is None:
+                print(
+                    f"[WARN] fishing_bot 已运行 {bot_elapsed_sec:.2f}s (> {BOT_TIMEOUT_SEC:.2f}s)，"
+                    "先停止 fishing_bot，再执行兜底重启。"
+                )
+                terminate_bot_process(bot_proc)
+                bot_proc = None
 
-        absent_count = 0
-        f_press_count = 0
-        while True:
-            client_origin = get_client_origin(hwnd)
-            if client_origin is None:
-                time.sleep(POLL_INTERVAL)
-                continue
-            click_roi_img = capture_roi_auto(sct, hwnd, client_origin, CLICK_ROI, warned_state)
-            if click_roi_img is None:
-                time.sleep(POLL_INTERVAL)
-                continue
-            score_click = match_template_click(click_roi_img, click_tpl, click_mask)
-            if score_click < CLICK_MATCH_THRESHOLD:
-                absent_count += 1
-            else:
-                absent_count = 0
-            print(
-                f"[DEBUG] stage2 click_disappear_check "
-                f"score_click={score_click:.3f} "
-                f"threshold={CLICK_MATCH_THRESHOLD:.3f} "
-                f"absent_count={absent_count}/{DISAPPEAR_ABSENT_CONSEC_FRAMES}"
+            def restart_callback() -> bool:
+                nonlocal should_restart_flow, bot_proc
+                terminate_bot_process(bot_proc)
+                bot_proc = None
+                should_restart_flow = True
+                return True
+
+            recovered = attempt_fishing_recovery(
+                state=recovery_state,
+                trigger_label=trigger_label,
+                step_stuck_sec=step_stuck_sec,
+                fishing_bot_elapsed_sec=bot_elapsed_sec,
+                restart_callback=restart_callback,
             )
+            return recovered
 
-            if absent_count >= DISAPPEAR_ABSENT_CONSEC_FRAMES:
-                print(
-                    f"[INFO] 点击图标连续{DISAPPEAR_ABSENT_CONSEC_FRAMES}帧低于阈值，"
-                    f"score={score_click:.3f}，开始启动 fishing_bot.py。"
-                )
-                break
-
-            press_f_once_to_window(hwnd)
-            f_press_count += 1
-            if f_press_count % 8 == 0:
-                print(
-                    f"[DEBUG] stage2 score_click={score_click:.3f} "
-                    f"absent_count={absent_count}/{DISAPPEAR_ABSENT_CONSEC_FRAMES} "
-                    f"f_press_count={f_press_count}"
-                )
-            elif f_press_count <= 3:
-                print(f"[DEBUG] stage2 send_f backend={INPUT_BACKEND} count={f_press_count}")
-            if f_press_count >= MAX_F_PRESS_COUNT_IN_STAGE2:
-                print(
-                    f"[WARN] stage2 按F已达上限 {MAX_F_PRESS_COUNT_IN_STAGE2} 次，"
-                    "强制进入下一阶段并启动 fishing_bot.py，避免循环卡死。"
-                )
-                break
-            time.sleep(F_PRESS_INTERVAL)
-
-        # 3) 调用 fishing_bot.py（预启动模式下发送启动信号）
-        if bot_proc is not None and bot_proc.poll() is None and PRELAUNCH_BOT:
-            bot_start_signal_path.write_text("start\n", encoding="utf-8")
-            print(f"[INFO] 已发送 fishing_bot.py 启动信号：{bot_start_signal_path}")
-        else:
-            if not PYTHON_EXE.exists() or not FISHING_BOT_PATH.exists():
-                print("[ERROR] .venv Python 或 fishing_bot.py 不存在，无法调用。")
-                return
-            bot_proc = subprocess.Popen([str(PYTHON_EXE), str(FISHING_BOT_PATH)])
-            print(f"[INFO] fishing_bot.py 已启动，pid={bot_proc.pid}")
-
-        # 4) 结束标志：匹配关闭.png
-        while True:
-            if bot_proc.poll() is not None:
-                print("[WARN] fishing_bot.py 已提前退出。")
-                break
-            client_origin = get_client_origin(hwnd)
-            if client_origin is None:
+        with mss.MSS() as sct:
+            # 1) 点击图标出现
+            while True:
+                if not win32gui.IsWindow(hwnd):
+                    print("[ERROR] 目标窗口失效，流程结束。")
+                    return
+                recovery_triggered = try_recovery("stage1_wait_click")
+                if recovery_triggered:
+                    break
+                client_origin = get_client_origin(hwnd)
+                if client_origin is None:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                click_roi_img = capture_roi_auto(sct, hwnd, client_origin, CLICK_ROI, warned_state)
+                if click_roi_img is None:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                score_click = match_template_click(click_roi_img, click_tpl, click_mask)
+                if score_click >= CLICK_MATCH_THRESHOLD:
+                    print(f"[INFO] 命中 点击.png，score={score_click:.3f}，开始按F。")
+                    stage_progress_ts = time.time()
+                    break
                 time.sleep(POLL_INTERVAL)
+            if should_restart_flow:
                 continue
-            close_roi_img = capture_roi_auto(sct, hwnd, client_origin, CLOSE_ROI, warned_state)
-            if close_roi_img is None:
+
+            # 2) 按F直到“点击图标”无法匹配
+            if PRELAUNCH_BOT and bot_proc is None:
+                if not PYTHON_EXE.exists() or not FISHING_BOT_PATH.exists():
+                    print("[ERROR] .venv Python 或 fishing_bot.py 不存在，无法预启动 fishing_bot.py。")
+                    return
+                bot_start_signal_path.parent.mkdir(parents=True, exist_ok=True)
+                env = os.environ.copy()
+                env["FISHING_BOT_WAIT_SIGNAL"] = "1"
+                env["FISHING_BOT_START_SIGNAL_PATH"] = str(bot_start_signal_path.resolve())
+                bot_proc = subprocess.Popen([str(PYTHON_EXE), str(FISHING_BOT_PATH)], env=env)
+                print(f"[INFO] fishing_bot.py 预启动完成，pid={bot_proc.pid}，等待启动信号。")
+                stage_progress_ts = time.time()
+
+            absent_count = 0
+            f_press_count = 0
+            while True:
+                recovery_triggered = try_recovery("stage2_press_f")
+                if recovery_triggered:
+                    break
+                client_origin = get_client_origin(hwnd)
+                if client_origin is None:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                click_roi_img = capture_roi_auto(sct, hwnd, client_origin, CLICK_ROI, warned_state)
+                if click_roi_img is None:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                score_click = match_template_click(click_roi_img, click_tpl, click_mask)
+                if score_click < CLICK_MATCH_THRESHOLD:
+                    absent_count += 1
+                else:
+                    absent_count = 0
+                print(
+                    f"[DEBUG] stage2 click_disappear_check "
+                    f"score_click={score_click:.3f} "
+                    f"threshold={CLICK_MATCH_THRESHOLD:.3f} "
+                    f"absent_count={absent_count}/{DISAPPEAR_ABSENT_CONSEC_FRAMES}"
+                )
+
+                if absent_count >= DISAPPEAR_ABSENT_CONSEC_FRAMES:
+                    print(
+                        f"[INFO] 点击图标连续{DISAPPEAR_ABSENT_CONSEC_FRAMES}帧低于阈值，"
+                        f"score={score_click:.3f}，开始启动 fishing_bot.py。"
+                    )
+                    stage_progress_ts = time.time()
+                    break
+
+                press_f_once_to_window(hwnd)
+                stage_progress_ts = time.time()
+                f_press_count += 1
+                if f_press_count % 8 == 0:
+                    print(
+                        f"[DEBUG] stage2 score_click={score_click:.3f} "
+                        f"absent_count={absent_count}/{DISAPPEAR_ABSENT_CONSEC_FRAMES} "
+                        f"f_press_count={f_press_count}"
+                    )
+                elif f_press_count <= 3:
+                    print(f"[DEBUG] stage2 send_f backend={INPUT_BACKEND} count={f_press_count}")
+                if f_press_count >= MAX_F_PRESS_COUNT_IN_STAGE2:
+                    print(
+                        f"[WARN] stage2 按F已达上限 {MAX_F_PRESS_COUNT_IN_STAGE2} 次，"
+                        "强制进入下一阶段并启动 fishing_bot.py，避免循环卡死。"
+                    )
+                    stage_progress_ts = time.time()
+                    break
+                time.sleep(F_PRESS_INTERVAL)
+            if should_restart_flow:
+                continue
+
+            # 3) 调用 fishing_bot.py（预启动模式下发送启动信号）
+            if bot_proc is not None and bot_proc.poll() is None and PRELAUNCH_BOT:
+                bot_start_signal_path.write_text("start\n", encoding="utf-8")
+                print(f"[INFO] 已发送 fishing_bot.py 启动信号：{bot_start_signal_path}")
+            else:
+                if not PYTHON_EXE.exists() or not FISHING_BOT_PATH.exists():
+                    print("[ERROR] .venv Python 或 fishing_bot.py 不存在，无法调用。")
+                    return
+                bot_proc = subprocess.Popen([str(PYTHON_EXE), str(FISHING_BOT_PATH)])
+                print(f"[INFO] fishing_bot.py 已启动，pid={bot_proc.pid}")
+            bot_call_start_ts = time.time()
+            stage_progress_ts = bot_call_start_ts
+
+            # 4) 结束标志：匹配关闭.png 或 点击.png（点击仍在 CLICK_ROI 轮询）
+            stage4_click_hit_count = 0
+            stage4_close_hit_count = 0
+            while True:
+                recovery_triggered = try_recovery("stage4_wait_end")
+                if recovery_triggered:
+                    break
+                if bot_proc.poll() is not None:
+                    print("[WARN] fishing_bot.py 已提前退出。")
+                    stage_progress_ts = time.time()
+                    break
+                client_origin = get_client_origin(hwnd)
+                if client_origin is None:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                close_roi_img = capture_roi_auto(sct, hwnd, client_origin, CLOSE_ROI, warned_state)
+                if close_roi_img is None:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                score_close = match_template_plain(close_roi_img, close_tpl)
+                if score_close >= CLOSE_MATCH_THRESHOLD:
+                    stage4_close_hit_count += 1
+                else:
+                    stage4_close_hit_count = 0
+                if stage4_close_hit_count >= CLOSE_HIT_CONSEC_FRAMES:
+                    print(
+                        f"[INFO] 连续{CLOSE_HIT_CONSEC_FRAMES}帧命中 关闭.png，"
+                        f"latest_score={score_close:.3f}，准备结束 fishing_bot.py"
+                    )
+                    terminate_bot_process(bot_proc)
+                    press_esc_once_to_window(hwnd)
+                    print("[INFO] 已发送一次 ESC。")
+                    stage_progress_ts = time.time()
+                    break
+
+                click_roi_img = capture_roi_auto(sct, hwnd, client_origin, CLICK_ROI, warned_state)
+                if click_roi_img is None:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+                score_click = match_template_click(click_roi_img, click_tpl, click_mask)
+                if score_click >= CLICK_MATCH_THRESHOLD:
+                    stage4_click_hit_count += 1
+                else:
+                    stage4_click_hit_count = 0
+
+                if stage4_click_hit_count >= 3:
+                    print(
+                        f"[INFO] 连续3帧命中 点击.png，latest_score={score_click:.3f}，准备结束 fishing_bot.py"
+                    )
+                    terminate_bot_process(bot_proc)
+                    # 命中点击后不立即按 ESC：等待 3 秒，再看是否出现关闭按钮
+                    time.sleep(3.0)
+                    close_hit_count_after_wait = 0
+                    last_score_close_after_wait = -1.0
+                    close_confirmed_after_wait = False
+                    for _ in range(CLOSE_HIT_CONSEC_FRAMES + 2):
+                        client_origin_after_wait = get_client_origin(hwnd)
+                        if client_origin_after_wait is None:
+                            close_hit_count_after_wait = 0
+                            time.sleep(POLL_INTERVAL)
+                            continue
+                        close_roi_after_wait = capture_roi_auto(
+                            sct, hwnd, client_origin_after_wait, CLOSE_ROI, warned_state
+                        )
+                        if close_roi_after_wait is None:
+                            close_hit_count_after_wait = 0
+                            time.sleep(POLL_INTERVAL)
+                            continue
+
+                        score_close_after_wait = match_template_plain(close_roi_after_wait, close_tpl)
+                        last_score_close_after_wait = score_close_after_wait
+                        if score_close_after_wait >= CLOSE_MATCH_THRESHOLD:
+                            close_hit_count_after_wait += 1
+                        else:
+                            close_hit_count_after_wait = 0
+
+                        if close_hit_count_after_wait >= CLOSE_HIT_CONSEC_FRAMES:
+                            close_confirmed_after_wait = True
+                            break
+                        time.sleep(POLL_INTERVAL)
+
+                    if close_confirmed_after_wait:
+                        press_esc_once_to_window(hwnd)
+                        print(
+                            f"[INFO] 点击后等待3s连续{CLOSE_HIT_CONSEC_FRAMES}帧命中关闭.png，"
+                            f"latest_score={last_score_close_after_wait:.3f}，已发送一次 ESC。"
+                        )
+                    else:
+                        if last_score_close_after_wait >= 0.0:
+                            print(
+                                f"[INFO] 点击后等待3s未连续{CLOSE_HIT_CONSEC_FRAMES}帧命中关闭.png，"
+                                f"latest_score={last_score_close_after_wait:.3f}，不发送 ESC。"
+                            )
+                        else:
+                            print(
+                                f"[INFO] 点击后等待3s未连续{CLOSE_HIT_CONSEC_FRAMES}帧命中关闭.png，"
+                                "且关闭区域截图无效，不发送 ESC。"
+                            )
+                    stage_progress_ts = time.time()
+                    break
                 time.sleep(POLL_INTERVAL)
+            if should_restart_flow:
+                print("[WARN] 已触发兜底恢复，重新拉起主流程。")
                 continue
-            score_close = match_template_plain(close_roi_img, close_tpl)
-            if score_close >= CLOSE_MATCH_THRESHOLD:
-                print(f"[INFO] 命中 关闭.png，score={score_close:.3f}，准备结束 fishing_bot.py")
-                bot_proc.terminate()
-                try:
-                    bot_proc.wait(timeout=3)
-                except Exception:
-                    bot_proc.kill()
-                press_esc_once_to_window(hwnd)
-                print("[INFO] 已发送一次 ESC。")
-                break
-            time.sleep(POLL_INTERVAL)
+            break
 
     print("[INFO] 新流程结束。")
 
